@@ -1,0 +1,571 @@
+---
+title: "Strava club VTT Saint-Germain-en-Laye"
+#runtime: shiny
+output:
+  #html_document
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    #vertical_layout: scroll
+    #logo: img.png
+    #favicon: img.png
+    favicon: "https://dgalywyr863hv.cloudfront.net/pictures/clubs/28259/698625/1/large.jpg"
+---
+
+<style>                     
+.navbar-brand {
+  background-color: #fc4c02;
+}
+.avatars {
+  margin-bottom: 5px;
+}
+.avatar-athlete {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+}
+.avatar-athlete:hover {
+  transform: scale(2);
+}
+.blur {
+    opacity: 0.1;
+    filter: alpha(opacity=10); /* For IE8 and earlier */
+}
+table {
+  float: left;
+}
+</style>       
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+
+```{r libraries, warning = FALSE, message = FALSE}
+library(data.table)
+library(stringr)
+library(flexdashboard)
+library(DT)
+library(htmltools)
+library(rvest)
+library(ggplot2)
+library(plotly)
+library(scales)
+library(lubridate)
+library(knitr)
+```
+
+```{r load data}
+#file <- "../../Robject/athl_data_2017-12-26.rds"
+file <- rev(list.files("../../Robject", "^athl_data_20", full.names = TRUE))[1]
+dt.athl <- readRDS(file)
+```
+
+<!---data processing--->
+
+```{r club metadata}
+id <- "28259"
+url <- paste0("https://www.strava.com/clubs/", id)
+avatar <- "https://dgalywyr863hv.cloudfront.net/pictures/clubs/28259/698625/1/large.jpg"
+name <- "VTT Saint-Germain-en-Laye"
+location <- "Saint-Germain-en-Laye"
+```
+
+```{r date values}
+view <- str_extract(file, "[0-9\\-]+_[0-9:]+") %>% str_replace("_", " ")
+ym <- dt.athl[!is.na(cm), unique(cm)]
+m <- str_sub(ym, 5, 7) %>% as.integer()
+y <- str_sub(ym, 1, 4) %>% as.integer()
+l13m <- paste(c(month.name[m:12], month.name[1:m]), c(rep(y-1, m-11), rep(y, m)))
+l13m_ <- paste(str_sub(l13m, 1, 3), str_sub(l13m, -4), sep = ". ")
+```
+
+```{r athlete data}
+# modify name
+dt.athl[, tempo := .N, by = .(word(name))]
+dt.athl[, name_ := ifelse(tempo == 1, word(name), paste0(str_extract(name, "[\\w]+ \\w"), "."))]
+dt.athl[, name_ := str_to_title(name_)]
+dt.athl[, tempo := NULL]
+# column order
+setcolorder(dt.athl, c(1:3, 31, 4:5, 7, 6, 8, 18:30, 9, 13, 11, 10, 12, 17, 15, 14, 16))
+```
+
+```{r data conso}
+sdcols <- str_subset(names(dt.athl), "_all_")
+dt.sum_all <- dt.athl[, lapply(.SD, sum), .SDcols = sdcols, by = cm]
+sdcols <- str_subset(names(dt.athl), "^(ytd_)|(at_)")[-1]
+dt.sum_ytd_at <- dt.athl[, lapply(.SD, sum), .SDcols = sdcols, by = .(cm, ytd_at_activity)]
+```
+
+```{r add stats}
+q.addstats_all <- quote(`:=`(cm_all_speed = cm_all_dist / as.numeric(cm_all_time) * 3600,
+                             cm_all_elevspeed = cm_all_elev / as.numeric(cm_all_time) * 3600,
+                             cm_all_slope = cm_all_elev / cm_all_dist / 1000,
+                             l12m_all_dist = rowSums(.SD)))
+q.addstats_ytd_at <- quote(`:=`(ytd_time_mean = ytd_time / ytd_nb,
+                                ytd_dist_mean = ytd_dist / ytd_nb,
+                                ytd_elev_mean = ytd_elev / ytd_nb,
+                                ytd_speed = ytd_dist / as.numeric(ytd_time) * 3600,
+                                ytd_elevspeed = ytd_elev / as.numeric(ytd_time) * 3600,
+                                ytd_slope = ytd_elev / ytd_dist / 1000,
+                                at_time_mean = at_time / at_nb,
+                                at_dist_mean = at_dist / at_nb,
+                                at_elev_mean = at_elev / at_nb,
+                                at_speed = at_dist / as.numeric(at_time) * 3600,
+                                at_elevspeed = at_elev / as.numeric(at_time) * 3600,
+                                at_slope = at_elev / at_dist / 1000))
+sdcols <- str_subset(names(dt.athl), "^m-")[-1]
+dt.athl[, eval(q.addstats_all), .SDcols = sdcols]
+dt.athl[, eval(q.addstats_ytd_at)]
+dt.sum_all[, eval(q.addstats_all), .SDcols = sdcols]
+dt.sum_ytd_at[, eval(q.addstats_ytd_at)]
+```
+
+```{r replace non finite values by 0}
+sdcols <- str_subset(names(dt.athl), "((speed)|(slope)|(mean))$")
+dt.athl[, c(sdcols) := lapply(.SD, function(x) ifelse(is.finite(x), x, 0)), .SDcols = sdcols]
+```
+
+```{r columns name}
+cols <- names(dt.athl)
+cols_dist <- str_subset(cols, "_dist(_mean)*$")
+cols_time <- str_subset(cols, "_time(_mean)*$")
+cols_elev <- str_subset(cols, "_elev(_mean)*$")
+cols_speed <- str_subset(cols, "_speed$")
+cols_elevspeed <- str_subset(cols, "_elevspeed$")
+cols_slope <- str_subset(cols, "_slope$")
+cols_nb <- str_subset(cols, "_nb$")
+cols_mean <- str_subset(cols, "_mean$")
+```
+
+```{r function to format as character}
+# time as character and preserve order 
+f.duration_to_char <- function(x) {
+  period <- round(x) %>% seconds_to_period() %>% str_sub(1, -4)
+  d <- str_extract(period, "[0-9]+d") %>% str_pad(4)
+  h <- str_extract(period, "[0-9]+H") %>% str_pad(3)
+  m <-str_extract(period, "[0-9]+M") %>% str_pad(3)
+  dhm <- paste(d, h , m) %>% str_replace_all("NA", "") %>% str_to_lower() %>% str_pad(12)
+}
+# numeric to character
+f.num_to_char <- function(x, nsmall = 0L, suffix = NULL) {
+  format(x, nsmall = nsmall, digits = 0, big.mark = " ", scientific = FALSE) %>%
+    paste(suffix) %>%
+    str_trim()
+}
+```
+
+```{r club data for value boxes, eval = FALSE}
+dt.vb <- copy(dt.sum)
+dt.vb[, c(cols_dist) := lapply(.SD, f.num_to_char, suffix = "km"), .SDcols = cols_dist]
+dt.vb[, c(cols_time) := lapply(.SD, f.duration_to_char), .SDcols = cols_time]
+dt.vb[, c(cols_elev) := lapply(.SD, f.num_to_char, suffix = "m"), .SDcols = cols_elev]
+dt.vb[, c(cols_speed) := lapply(.SD, f.num_to_char, nsmall = 1, suffix = "km/h"), .SDcols = cols_speed]
+dt.vb[, c(cols_elevspeed) := lapply(.SD, f.num_to_char, suffix = "m/h"), .SDcols = cols_elevspeed]
+dt.vb[, c(cols_slope) := lapply(.SD, function(x) sprintf(fmt = "%.1f%%", 100 * x)), .SDcols = cols_slope]
+dt.vb[, c(cols_nb) := lapply(.SD, f.num_to_char), .SDcols = cols_nb]
+```
+
+```{r colors}
+color_dist <- rgb(0, 0, 1)
+color_time <- rgb(0, 1, 0)
+color_elev <- rgb(1, 0, 0)
+color_nb <- rgb(1/3, 1/3, 1/3)
+# function to average colors
+f.averagecolor <- function(...) {
+  mixcolor <- rowMeans(col2rgb(c(...)))
+  color <- rgb(mixcolor["red"], mixcolor["green"], mixcolor["blue"], maxColorValue = 255)
+}
+```
+
+```{r cols info data}
+dt.cols_info <- data.table(col = names(dt.athl))
+dt.cols_info[col %chin% cols_dist, `:=`(label = "Distance (km)", color = color_dist)]
+dt.cols_info[col %chin% cols_time, `:=`(label = "Time", color = color_time)]
+dt.cols_info[col %chin% cols_elev, `:=`(label = "Elevation (m)", color = color_elev)]
+dt.cols_info[col %chin% cols_speed, `:=`(label = "Speed (km/h)", color = f.averagecolor(color_dist, color_time))]
+dt.cols_info[col %chin% cols_elevspeed, `:=`(label = "Elevation speed (m/h)", color = f.averagecolor(color_elev, color_time))]
+dt.cols_info[col %chin% cols_slope, `:=`(label = "Slope", color = f.averagecolor(color_elev, color_dist))]
+dt.cols_info[col %chin% cols_nb, `:=`(label = "Activities", color = color_nb)]
+dt.cols_info[col %chin% cols_mean, label := paste("Average", str_to_lower(label))]
+dt.cols_info[col %chin% str_subset(cols_mean,"_dist_"), color := f.averagecolor(color_dist, color_nb)]
+dt.cols_info[col %chin% str_subset(cols_mean,"_time_"), color := f.averagecolor(color_time, color_nb)]
+dt.cols_info[col %chin% str_subset(cols_mean,"_elev_"), color := f.averagecolor(color_elev, color_nb)]
+cols <- c(str_subset(dt.cols_info$col, "^m-"), "l12m_all_dist")
+dt.cols_info[col %chin% cols, label := c(l13m, "Last 12 months")]
+dt.cols_info[col == "name_", label := "Athlete"]
+```
+
+```{r function for value boxes}
+f.valueboxes <- function(dt) {
+  vbs <- lapply(names(dt), function(i) {
+    value <- dt[[i]]
+    if (str_detect(i, "_dist(_mean)*$")) value <- f.num_to_char(value, suffix = "km")
+    if (str_detect(i, "_time(_mean)*$")) value <- f.duration_to_char(value)
+    if (str_detect(i, "_elev(_mean)*$")) value <- f.num_to_char(value, suffix = "m")
+    if (str_detect(i, "_speed$")) value <- f.num_to_char(value, nsmall = 1, suffix = "km/h")
+    if (str_detect(i, "_elevspeed$")) value <- f.num_to_char(value, suffix = "m/h")
+    if (str_detect(i, "_slope$")) value <- sprintf(fmt = "%.1f%%", 100 * value)
+    if (str_detect(i, "_nb$")) value <- f.num_to_char(value)
+    caption <- dt.cols_info[col == i, label] %>% str_replace_all(" \\(.+\\)$", "")
+    #valueBox(value, caption, color = "#fc4c02")
+    valueBox(value, caption)
+  })
+  out <- lapply(seq_along(vbs), function(i) {
+    knit_expand(text = sprintf("###\n\n `r vbs[[%d]]` \n", i))
+  })
+  knit(text = paste(out, collapse = "\n"))
+}
+```
+
+```{r function for datatable}
+f.datatable <- function(dt, col_desc_order = NULL) {
+  # add average
+  sdcols <- names(dt)[sapply(dt, is.numeric)]
+  dt.mean <- dt[, lapply(.SD, mean, na.rm = TRUE), .SDcols = sdcols]
+  dt.mean[, name_ := " average"]
+  dt <- rbind(dt, dt.mean, fill = TRUE)
+  # format name
+  dt[, name_ := paste0("<nobr>", name_, "</nobr>")]
+  # format time
+  sdcols <- str_subset(names(dt), "_time(_mean)*$")
+  dt[, c(sdcols) := lapply(.SD, f.duration_to_char), .SDcols = sdcols]
+  dt[, c(sdcols) := lapply(.SD, str_replace_all, pattern = " ", replacement = "&nbsp;&nbsp"), .SDcols = sdcols]
+  # replace 0 with NA
+  sdcols <- names(dt)[sapply(dt, is.numeric)]
+  dt[, c(sdcols) := lapply(.SD, function(x) ifelse(x == 0, NA, x)), .SDcols = sdcols]
+  # column names
+  colnames <- sapply(names(dt), function(x) {
+    dt.cols_info[col == x, label]
+  })
+  l13m <- str_subset(colnames, "[0-9]{4}$")
+  l13m_ <- paste0(str_sub(l13m, 1, 3), ifelse(str_count(l13m) > 8, ". ", " "), str_sub(l13m, -4))
+  colnames[colnames %chin% l13m] <- l13m_
+  names(colnames) <- NULL
+  # index time columns
+  cols_time_index <- str_which(names(dt.athl_), "_time(_mean)*$")
+  # datatable
+  datatable <- datatable(dt,
+                         class = "cell-border compact",
+                         rownames = FALSE,
+                         colnames = colnames,
+                         escape = FALSE,
+                         options = list(pageLength = nrow(dt),
+                                        autoWidth = TRUE,
+                                        columnDefs = list(list(width = "50px", orderSequence = c("desc", "asc"), targets = "_all"),
+                                                          list(className = 'dt-right', targets = cols_time_index - 1)),
+                                        order = list(col_desc_order, 'desc'),
+                                        dom = "t")) %>%
+    formatRound(str_subset(names(dt), "_dist$"), digits = 0, mark = " ") %>%
+    formatRound(str_subset(names(dt), "_dist_mean$"), digits = 1, mark = " ") %>%
+    formatRound(str_subset(names(dt), "_elev"), digits = 0, mark = " ") %>%
+    formatRound(str_subset(names(dt), "_speed"), digits = 1, mark = " ") %>%
+    formatPercentage(str_subset(names(dt), "_slope"), digits = 1, mark = " ") %>%
+    formatRound(str_subset(names(dt), "_nb"), digits = 0, mark = " ")
+  # background average row
+  datatable <- datatable %>%
+    formatStyle(columns = 1,
+                target = "row",
+                backgroundColor = styleEqual(dt[.N, 1], "#65A2E8"),
+                color = styleEqual(dt[.N, 1], "white"),
+                fontWeight = styleEqual(dt[.N, 1], "bold"))
+  # background cells
+  for (col in names(dt)[-1]) {
+    datatable <- datatable %>%
+      formatStyle(col,
+                  backgroundColor = styleEqual(sort(dt[[col]][-1],
+                                                    decreasing = TRUE)[1:3],
+                                               c("#FFD700", "#CECECE", "#965A38")))
+  }
+  return(datatable)
+}
+```
+
+```{r function for graphs}
+f.ggplot <- function(dt, x, y = NULL) {
+  cols_time <- str_subset(names(dt), "_time(_mean)*$")
+  if (length(cols_time)) dt[, c(cols_time) := lapply(.SD, as.numeric), .SDcols = cols_time]
+  xlabel <- dt.cols_info[col == x, label]
+  xcolor <- dt.cols_info[col == x, color]
+  labels <- format_format(big.mark = " ", decimal.mark = ".", scientific = FALSE)
+  if (str_detect(x, "_slope$")) labels <- percent
+  xcbreaks <- cbreaks(c(0, max(dt[[x]])), pretty_breaks(3), labels)
+  xbreaks <- xcbreaks$breaks
+  xlabels <- xcbreaks$labels
+  if (str_detect(x, "_time")) {
+    hd <- ifelse(max(dt[[x]]) < 24 * 3600 * 4, 1, 24)
+    cbreaks <- cbreaks(c(0, max(dt[[x]])) / 3600 / hd, pretty_breaks(3))
+    xbreaks <- cbreaks$breaks * 3600 * hd
+    xlabels <- paste0(cbreaks$breaks, ifelse(hd == 1, "h", "d"))
+  }
+  sdcols <- str_subset(cols, "^m-")
+  xmax <- ifelse(str_detect(x, "^m-"), dt[, max(.SD), .SDcols = sdcols], NA)     
+  if (is.null(y)) {
+    ggplot(dt, aes(reorder(name_, get(x)), get(x))) +
+      geom_col(fill = xcolor) +
+      coord_flip() +
+      scale_y_continuous(breaks = xbreaks, labels = xlabels, position = "top", limits = c(0, xmax)) +
+      geom_hline(yintercept = as.numeric(mean(dt[[x]])), color = "#65A2E8") +
+      labs(subtitle = xlabel, x = NULL, y = NULL) +
+      theme(title = element_text(color = xcolor),
+            axis.text.x = element_text(color = xcolor),
+            axis.ticks.x = element_line(color = xcolor),
+            plot.background = element_rect(color = "black"))
+  } else {
+    ylabel <- dt.cols_info[col == y, label]
+    ycolor <- dt.cols_info[col == y, color]
+    color <- f.averagecolor(xcolor, ycolor)
+    labels <- format_format(big.mark = " ", decimal.mark = ".", scientific = FALSE)
+    if (str_detect(y, "_slope$")) labels <- percent
+    ycbreaks <- cbreaks(c(0, max(dt[[y]])), pretty_breaks(3), labels)
+    ybreaks <- ycbreaks$breaks
+    ylabels <- ycbreaks$labels
+    if (str_detect(y, "_time")) {
+      hd <- ifelse(max(dt[[y]]) < 24 * 3600 * 4, 1, 24)
+      ybreaks <- cbreaks(range(dt[[y]]) / 3600 / hd)$breaks
+      ylabels <- paste0(ybreaks, ifelse(hd == 1, "h", "d"))
+      ybreaks <- ybreaks * 3600 * hd
+    }
+    ggplot(dt, aes(get(x), get(y))) +
+      geom_vline(xintercept = as.numeric(mean(dt[[x]])), color = "#65A2E8") +
+      geom_hline(yintercept = as.numeric(mean(dt[[y]])), color = "#65A2E8") +
+      geom_jitter(col = color) +
+      scale_x_continuous(breaks = xbreaks, labels = xlabels) +
+      scale_y_continuous(breaks = ybreaks, labels = ylabels) +
+      labs(x = xlabel, y = ylabel) +
+      theme(title = element_text(colour = color),
+            axis.title.x = element_text(color = xcolor),
+            axis.text.x = element_text(color = xcolor),
+            axis.ticks.x = element_line(color = xcolor),
+            axis.title.y = element_text(color = ycolor),
+            axis.text.y = element_text(color = ycolor),
+            axis.ticks.y = element_line(color = ycolor),
+            plot.background = element_rect(color = "black"))
+  }  
+}
+```
+
+```{r div with avatars and links}
+avatars <- div(class = "avatars",
+               a(href = url,
+                 img(src = avatar,
+                     title = name,
+                     width = "64px",
+                     height = "64px",
+                     class = "avatar-club",
+                     alt = "Avatar")),
+               lapply(1:nrow(dt.athl), function(x) {
+                 a(href = paste0("https://www.strava.com/athletes/", dt.athl$id[x]),
+                   img(src = dt.athl$avatar[x],
+                       title = dt.athl$name_[x],
+                       class = "avatar-athlete",
+                       alt = "Avatar"))
+               })
+)
+```
+
+
+
+<!---display dashboard--->
+
+```{r}
+source <- paste("strava athletes public data as at", view)
+```
+
+
+`r (page <- paste0(last(l13m), " - All activities"))`
+===
+
+__`r page`__ (_`r source`_)
+
+```{r}
+avatars
+```
+
+```{r}
+cols <- str_subset(names(dt.athl), "^cm_")
+dt.vb <- dt.sum_all[!is.na(cm), mget(cols)]
+dt.athl_ <- dt.athl[, mget(c("name_", cols))]
+```
+
+Column {data-width=1}
+---
+
+`r f.valueboxes(dt.vb)`
+
+Column {.tabset .tabset-fade}
+---
+
+### Bar plots
+```{r, fig.width = 3.5, fig.height = 3.5}
+for (col in cols) plot(f.ggplot(dt.athl_, col))
+```
+
+### Athletes table
+`r f.datatable(dt.athl_, 1)`
+
+### Scatterplots
+```{r, fig.width = 3.5, fig.height = 3.5}
+prefix <- unique(str_extract(cols, "^([a-z]+_){2}"))
+f.ggplot(dt.athl_, paste0(prefix, "time"), paste0(prefix, "dist"))
+f.ggplot(dt.athl_, paste0(prefix, "time"), paste0(prefix, "elev"))
+f.ggplot(dt.athl_, paste0(prefix, "dist"), paste0(prefix, "elev"))
+f.ggplot(dt.athl_, paste0(prefix, "slope"), paste0(prefix, "speed"))
+f.ggplot(dt.athl_, paste0(prefix, "slope"), paste0(prefix, "elevspeed"))
+```
+
+
+
+`r (page <- "Last months distance - All activities")`
+===
+
+__`r page`__ (_`r source`_)
+
+```{r}
+avatars
+```
+
+```{r}
+cols <- c(str_subset(names(dt.athl), "^m-"), "l12m_all_dist") %>% rev()
+dt.vb <- dt.sum_all[!is.na(cm), mget(cols)]
+dt.athl_ <- dt.athl[, mget(c("name_", cols))]
+```
+
+Column {data-width=1}
+---
+
+`r f.valueboxes(dt.vb)`
+
+Column {.tabset .tabset-fade}
+---
+
+### Bar plots
+```{r, fig.width = 10.5, fig.height = 3.5}
+f.ggplot(dt.athl_, cols[1])
+```
+```{r, fig.width = 3.5, fig.height = 3.5}
+for (col in cols[-1]) plot(f.ggplot(dt.athl_, col))
+```
+
+### Athletes table
+`r f.datatable(dt.athl_, 1)`
+
+```{r, eval = FALSE}
+prefix <- unique(str_extract(cols, "^([a-z]+_){2}"))
+```
+
+
+
+`r (page <- paste0(y, " year to date - Bike activities"))`
+===
+
+__`r page`__ (_`r source`_)
+
+```{r}
+blur <- which(dt.athl$ytd_at_activity != "Cycling")
+for (i in blur) {
+  class <- avatars$children[[2]][[i]]$children[[1]]$attribs$class
+  avatars$children[[2]][[i]]$children[[1]]$attribs$class <- paste(class, "blur")
+}
+avatars
+```
+
+```{r}
+cols <- str_subset(names(dt.athl), "^ytd_")[-1]
+dt.vb <- dt.sum_ytd_at[!is.na(cm) & ytd_at_activity == "Cycling", mget(cols)]
+dt.athl_ <- dt.athl[ytd_at_activity == "Cycling", mget(c("name_", cols))]
+```
+
+Column {data-width=1}
+---
+
+`r f.valueboxes(dt.vb)`
+
+Column {.tabset .tabset-fade}
+---
+
+### Bar plots
+```{r, fig.width = 2.8, fig.height = 3.5}
+for (col in cols) plot(f.ggplot(dt.athl_, col))
+```
+
+### Athletes table
+`r f.datatable(dt.athl_, 2)`
+
+### Scatterplots
+```{r, fig.width = 3.5, fig.height = 3.5}
+prefix <- unique(str_extract(cols, "^([a-z]+_)"))
+f.ggplot(dt.athl_, paste0(prefix, "nb"), paste0(prefix, "time"))
+f.ggplot(dt.athl_, paste0(prefix, "nb"), paste0(prefix, "dist"))
+f.ggplot(dt.athl_, paste0(prefix, "nb"), paste0(prefix, "elev"))
+f.ggplot(dt.athl_, paste0(prefix, "time"), paste0(prefix, "dist"))
+f.ggplot(dt.athl_, paste0(prefix, "time"), paste0(prefix, "elev"))
+f.ggplot(dt.athl_, paste0(prefix, "dist"), paste0(prefix, "elev"))
+f.ggplot(dt.athl_, paste0(prefix, "time_mean"), paste0(prefix, "speed"))
+f.ggplot(dt.athl_, paste0(prefix, "time_mean"), paste0(prefix, "elevspeed"))
+f.ggplot(dt.athl_, paste0(prefix, "time_mean"), paste0(prefix, "slope"))
+f.ggplot(dt.athl_, paste0(prefix, "dist_mean"), paste0(prefix, "speed"))
+f.ggplot(dt.athl_, paste0(prefix, "dist_mean"), paste0(prefix, "elevspeed"))
+f.ggplot(dt.athl_, paste0(prefix, "dist_mean"), paste0(prefix, "slope"))
+f.ggplot(dt.athl_, paste0(prefix, "elev_mean"), paste0(prefix, "speed"))
+f.ggplot(dt.athl_, paste0(prefix, "elev_mean"), paste0(prefix, "elevspeed"))
+f.ggplot(dt.athl_, paste0(prefix, "elev_mean"), paste0(prefix, "slope"))
+f.ggplot(dt.athl_, paste0(prefix, "slope"), paste0(prefix, "speed"))
+f.ggplot(dt.athl_, paste0(prefix, "slope"), paste0(prefix, "elevspeed"))
+```
+
+
+
+`r (page <- "All time - Bike activities")`
+===
+
+__`r page`__ (_`r source`_)
+
+```{r}
+avatars
+```
+
+```{r}
+cols <- str_subset(names(dt.athl), "^at_")
+dt.vb <- dt.sum_ytd_at[!is.na(cm) & ytd_at_activity == "Cycling", mget(cols)]
+dt.athl_ <- dt.athl[ytd_at_activity == "Cycling", mget(c("name_", cols))]
+```
+
+Column {data-width=1}
+---
+
+`r f.valueboxes(dt.vb)`
+
+Column {.tabset .tabset-fade}
+---
+
+### Bar plots
+```{r, fig.width = 2.8, fig.height = 3.5}
+for (col in cols) plot(f.ggplot(dt.athl_, col))
+```
+
+### Athletes table
+`r f.datatable(dt.athl_, 2)`
+
+### Scatterplots
+```{r, fig.width = 3.5, fig.height = 3.5}
+prefix <- unique(str_extract(cols, "^([a-z]+_)"))
+f.ggplot(dt.athl_, paste0(prefix, "nb"), paste0(prefix, "time"))
+f.ggplot(dt.athl_, paste0(prefix, "nb"), paste0(prefix, "dist"))
+f.ggplot(dt.athl_, paste0(prefix, "nb"), paste0(prefix, "elev"))
+f.ggplot(dt.athl_, paste0(prefix, "time"), paste0(prefix, "dist"))
+f.ggplot(dt.athl_, paste0(prefix, "time"), paste0(prefix, "elev"))
+f.ggplot(dt.athl_, paste0(prefix, "dist"), paste0(prefix, "elev"))
+f.ggplot(dt.athl_, paste0(prefix, "time_mean"), paste0(prefix, "speed"))
+f.ggplot(dt.athl_, paste0(prefix, "time_mean"), paste0(prefix, "elevspeed"))
+f.ggplot(dt.athl_, paste0(prefix, "time_mean"), paste0(prefix, "slope"))
+f.ggplot(dt.athl_, paste0(prefix, "dist_mean"), paste0(prefix, "speed"))
+f.ggplot(dt.athl_, paste0(prefix, "dist_mean"), paste0(prefix, "elevspeed"))
+f.ggplot(dt.athl_, paste0(prefix, "dist_mean"), paste0(prefix, "slope"))
+f.ggplot(dt.athl_, paste0(prefix, "elev_mean"), paste0(prefix, "speed"))
+f.ggplot(dt.athl_, paste0(prefix, "elev_mean"), paste0(prefix, "elevspeed"))
+f.ggplot(dt.athl_, paste0(prefix, "elev_mean"), paste0(prefix, "slope"))
+f.ggplot(dt.athl_, paste0(prefix, "slope"), paste0(prefix, "speed"))
+f.ggplot(dt.athl_, paste0(prefix, "slope"), paste0(prefix, "elevspeed"))
+```
+
+

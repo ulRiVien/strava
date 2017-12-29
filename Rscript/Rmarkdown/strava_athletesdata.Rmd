@@ -1,0 +1,223 @@
+---
+title: "Strava - Athletes data"
+date: '`r format(Sys.time(), "%d %B %Y")`'
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries, warning = FALSE, message = FALSE}
+library(rvest)
+library(stringr)
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(DT)
+```
+
+# Scrapping
+
+* Function to scrappe data from Strava athlete page  
+No connexion required.  
+```{r function to scrappe}
+f.athlete_data <- function(id) {
+  
+  athl_url <- paste0("https://www.strava.com/athletes/", id)
+  #if (!RCurl::url.exists(athl_url)) stop("Athlete does not exist")
+  
+  doc <- read_html(athl_url)
+  doc <- html_node(doc, "#athlete-view")
+
+  # profile
+  avatar <- html_node(doc, ".athlete-profile .avatar-img") %>% html_attr("src")
+  name <- html_node(doc, ".athlete-profile .bottomless") %>% html_text()
+  location <- html_node(doc, ".athlete-profile .location") %>% html_text()
+  
+  # last 13 months monthly distance all activities
+  l13m_all_intervals <- html_nodes(doc, ".athlete-graph .intervals .interval") %>% html_attr("id")
+  l13m_all_dist_px <- sapply(l13m_all_intervals, function(i) {
+    html_nodes(doc, paste0(".athlete-graph #", i[1],  " .fill")) %>% html_attr("style", 0)
+  })
+  l13m_all_dist_px <- str_replace_all(l13m_all_dist_px, "[^\\d\\.]+", "") %>% as.numeric()
+  names(l13m_all_dist_px) <- str_sub(l13m_all_intervals, 10)
+  l13m_all_dist_px100 <- html_nodes(doc, ".y-axis") %>% html_text()
+  l13m_all_dist_px100 <- str_extract(l13m_all_dist_px100, "[0-9]+$")
+  
+  # current month stats all activities
+  cm <- last(names(l13m_all_dist_px))
+  cm_all_stats <- html_nodes(doc, ".inline-stats strong") %>% html_text()
+  cm_all_stats <- str_replace_all(cm_all_stats, "\n", "")
+  stats_name <- c("dist", "time", "elev")
+  names(cm_all_stats) <- stats_name
+  
+  # current year and all time records
+  ytd_at_activity <- html_node(doc, ".athlete-records strong") %>% html_text()
+  records_stats <- html_nodes(doc, ".athlete-records td") %>% html_text()
+  ytd_stats <- records_stats[1:4]
+  names(ytd_stats) <- c(stats_name, "nb")
+  at_stats <- records_stats[5:8]
+  names(at_stats) <- c(stats_name, "nb")
+  
+  return(list(id = id,
+              avatar = avatar,
+              name = name,
+              location = location,
+              cm = cm,
+              l13m_all_dist_px = l13m_all_dist_px,
+              l13m_all_dist_px100 = l13m_all_dist_px100,
+              cm_all_stats = cm_all_stats,
+              ytd_at_activity = ytd_at_activity,
+              ytd_stats = ytd_stats,
+              at_stats = at_stats))
+}
+```
+
+* Application for 1 athlete  
+```{r athlete data}
+f.athlete_data(2216191)
+```
+
+___
+
+# Data table format 
+
+*  Athlete ids 
+```{r athlete ids}
+# members of club VTT Saint-Germain (club id 28259)
+ids <- c(580149, 1064065, 1078226, 1633448, 1636898,
+         2216191, 2225253, 3351268, 3440131, 3613818,
+         5092692, 5411671, 6534080, 7097243, 8767660,
+         11375165, 11433122, 11450803, 11715453,
+         12497128,
+         13206164, 16978434, 17127600, 17722512, 18308066,
+         21097239, 21175337, 21748556)
+```
+
+* Run scrapping function per id  
+Output as list of data tables.  
+```{r list athlete data table}
+system.time({
+  lst_dt <- lapply(ids, function(id) {
+    lst <- f.athlete_data(id)
+    if (all(lst$l13m_all_dist_px == "0")) lst$l13m_all_dist_px <- NULL
+    dt <- data.table(t(unlist(lst)))
+  })
+})
+```
+
+* Combine in 1 data table  
+```{r data table}
+dt <- rbindlist(lst_dt, fill = TRUE)
+```
+
+* Raw data structure  
+```{r glimpse}
+glimpse(dt)
+```
+
+* Save raw data
+```{r save raw data}
+saveRDS(dt, file = "../../Robject/athl_data_raw.rds")
+```
+
+___
+
+# Data processing
+
+* Load raw data
+```{r load raw data}
+dt <- readRDS("../../Robject/athl_data_raw.rds")
+```
+
+* Rename some columns  
+```{r rename}
+names(dt) <- str_replace(names(dt), "stats.", "")
+```
+
+* Reset incorrect monthly stats   
+(When there is no data for the current month Strava may display the data of the previous month.)  
+```{r reset}
+cols_l13m_all_dist_px <- str_subset(names(dt), "^l13m_all_dist_px\\.")
+dt[get(last(cols_l13m_all_dist_px)) == "0", ':='(cm_all_dist = "0km",
+                                                 cm_all_time = "0h 0m",
+                                                 cm_all_elev = "0m")]
+dt[str_sub(cm, 5) == 365, cm := NA]
+```
+
+* Extract and convert lengths (distance in km and elevation in m)
+```{r extract and convert lengths}
+f.length <- function(x) {
+  v <- as.numeric(str_replace_all(x, "[^\\d\\.]+", ""))
+  v[(str_detect(x, "mi$"))] <- v[(str_detect(x, "mi$"))] * 1.609344
+  v[(str_detect(x, "ft$"))] <- v[(str_detect(x, "ft$"))] * 0.3048
+  return(v)
+}
+cols_length <- str_subset(names(dt), "(_dist$)|(_elev$)")
+dt[, c(cols_length) := lapply(.SD, f.length), .SDcols = cols_length]
+```
+
+* Convert time
+```{r convert time}
+cols_time <- str_subset(names(dt), "_time$")
+dt[, c(cols_time) := lapply(.SD, function(x) as.duration(hm(x))), .SDcols = cols_time]
+#dt[, c(cols_time) := lapply(.SD, as.period), .SDcols = cols_time]
+```
+
+* Format number
+```{r format number}
+cols_nb <- str_subset(names(dt), "_nb$")
+dt[, c(cols_nb) := lapply(.SD, as.integer), .SDcols = cols_nb]
+```
+
+* Calculate (approx.) monthly distances from px to km
+```{r calculate monthly distances}
+cols_px <- str_subset(names(dt), "px")
+dt[, c(cols_px) := lapply(.SD, as.numeric), .SDcols = cols_px]
+dt[, c(cols_px) := lapply(.SD, function(x) ifelse(is.na(x), 0, x)), .SDcols = cols_px]
+months <-  str_sub(cols_l13m_all_dist_px, -6)
+cols_m_all_dist = paste0("m-", 12:0, "_all_dist")
+dt[, c(cols_m_all_dist) := lapply(.SD, function(x) x * l13m_all_dist_px100 / 100), .SDcols = cols_l13m_all_dist_px]
+dt[, c(cols_px) := NULL]
+```
+
+* Transformed data structure
+```{r glimpse2}
+glimpse(dt)
+```
+
+* Transformed data
+```{r display data}
+dt2 <- copy(dt)
+dt2[, `:=`(avatar = paste0("<img src='", dt2$avatar, "', width='32' heigth='32'>"))]
+datatable(dt2, escape = FALSE)
+```
+
+* Add missing avatar
+```{r}
+default = "https://d3nn82uaxijpm6.cloudfront.net/assets/avatar/athlete/large-63758b9942e3f074c3ecb84db07928ee.png"
+dt[id == "580149" & avatar == default, avatar := "https://dgalywyr863hv.cloudfront.net/pictures/athletes/580149/770307/5/medium.jpg"]
+dt[id == "2216191" & avatar == default, avatar := "https://dgalywyr863hv.cloudfront.net/pictures/athletes/2216191/1758548/1/medium.jpg"] 
+dt[id == "2225253" & avatar == default, avatar := "https://dgalywyr863hv.cloudfront.net/pictures/athletes/2225253/1373565/2/medium.jpg"]
+dt[id == "12497128" & avatar == default, avatar := "https://dgalywyr863hv.cloudfront.net/pictures/athletes/12497128/3728987/1/medium.jpg"]
+dt[id == "3440131" & avatar == default, avatar := "https://dgalywyr863hv.cloudfront.net/pictures/athletes/3440131/1931769/1/medium.jpg"]
+dt[id == "5092692" & avatar == default, avatar := "https://dgalywyr863hv.cloudfront.net/pictures/athletes/5092692/6984212/2/medium.jpg"]
+dt[id == "8767660" & avatar == default, avatar := "https://dgalywyr863hv.cloudfront.net/pictures/athletes/8767660/3649662/1/medium.jpg"]
+dt[id == "11375165" & avatar == default, avatar := "https://dgalywyr863hv.cloudfront.net/pictures/athletes/11375165/3775937/2/medium.jpg"]
+dt[id == "11450803" & avatar == default, avatar := "https://dgtzuqphqg23d.cloudfront.net/am0rrq1_Cim3XVV8J8cBBEl3_ahx0eFJODNwIgWDxIY-2048x1536.jpg"]
+dt[id == "12497128" & avatar == default, avatar := "https://dgalywyr863hv.cloudfront.net/pictures/athletes/12497128/3728987/1/medium.jpg"]
+dt[id == "13206164" & avatar == default, avatar := "https://dgalywyr863hv.cloudfront.net/pictures/athletes/13206164/3879961/6/medium.jpg"]
+```
+
+
+* Save transformed data
+```{r save, warning = FALSE}
+view <- now("UTC") %>% str_replace(" ", "_")
+(file <- paste0("athl_data_", view ,".rds"))
+saveRDS(dt, file = file.path("../../Robject", file))
+```
+
+
+
+
